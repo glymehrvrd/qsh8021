@@ -1,21 +1,18 @@
 # -*- coding: UTF-8 -*-
 
 import os
+import re
 from struct import pack, unpack
 from hashlib import md5
 from winpcapy import *
 from ctypes import *
 
+# Destination of 802.1x authorization server
 DOT1X_DST = b'\x01\x80\xc2\x00\x00\x03'
 ETH_TYPE_8021X = 0x888E
 PKT_TYPE_EAP = 0
-SOL_PACKET = 263
-PACKET_MR_MULTICAST = 0
-PACKET_ADD_MEMBERSHIP = 1
-SIOCGIFINDEX = 0x8933
-SIOCGIFHWADDR = 0x8927
 
-#802.1x Protocol Codes
+# 802.1x Protocol Codes
 AUTH_START = 1
 AUTH_REQUEST = 1
 AUTH_RESPONSE = 2
@@ -25,29 +22,26 @@ AUTH_TYPE_IDENTITY = 1
 AUTH_TYPE_MD5CHALLENGE = 4
 AUTH_LOGOFF = 2
 
-#State Codes
+# State Codes
 START = 1000
 IDENTITY_SENT = 1001
 IDENTITY_RECEIVED = 1001
 PASSWORD_SENT = 1002
-AUTH_ENDED = 1002
+ENDED = 1002
 
-#Status Codes:
-AUTH_BEGIN = 4000
-SEND_IDENTITY = 5000
-SEND_PASSWORD = 5001
-SUCCESS = 5002
-IDENTITY_FAILED = 7003
-PASSWORD_FAILED = 7004
-DISCONNECTED = 6000
-DHCP_FAILED = 8000
 
 def info(s):
-    print s
+    #print s
+    pass
+
 
 class Dot1X():
+    '''Class including functions to login 802.1x'''
+
     def __init__(self, username, password, interface, interface_index):
-        self.state = AUTH_START
+        '''initiate parametors'''
+
+        self.state = START
         self.username = username
         self.password = password
         self.interface = interface
@@ -58,59 +52,61 @@ class Dot1X():
             print "\nUnable to open the adapter. %s is not supported by WinPcap\n" % interface
 
     def run(self):
+        '''start 802.1x authorization'''
+
         self.StartAuth()
         self.AuthenticationLoop()
 
     def logoff(self, parent):
+        '''logoff from internet'''
+
         packet = self.MakeEthernetHeader()
         packet += self.MakeDot1XHeader(AUTH_LOGOFF, 0)
-        self.sock.pcap_sendpacket(packet, sizeof(packet))
+        pcap_sendpacket(self.sock, MakePkt(packet), len(packet))
 
     def StartAuth(self):
+        '''send authorization header'''
+
         packet = self.MakeEthernetHeader()
         packet += self.MakeDot1XHeader(AUTH_START, 0)
-        pkt = (c_ubyte * len(packet))()
-        for i in range(len(packet)):
-            tmp, = unpack('B', packet[i])
-            pkt[i] = tmp
-        pcap_sendpacket(self.sock, pkt, len(packet))
+        pcap_sendpacket(self.sock, MakePkt(packet), len(packet))
         info('Start Packet Sent')
 
     def AuthenticationLoop(self):
+        '''receive and response for 802.1x authroization'''
+
+        header = POINTER(pcap_pkthdr)()
+        authData = POINTER(c_ubyte)()
         while True:
-            header = POINTER(pcap_pkthdr)()
-            authData = POINTER(c_ubyte)()
             res = pcap_next_ex(self.sock, byref(header), byref(authData))
             if(res < 0):
                 break
 
-            etherProtocol = authData[12:13]
+            etherProtocol, = unpack('>I', str(bytearray([0, 0] + authData[12:14])))
             if(etherProtocol != ETH_TYPE_8021X):
                 continue
 
             info('Received Packet of length %d.' % header.contents.len)
-            eapCode, eapID, eapLength = unpack('>BBH', authData[18:22])
+            eapCode, eapID, eapLength = unpack('>BBH', str(bytearray(authData[18:22])))
 
             if self.state == START:
-
                 if eapCode == AUTH_REQUEST:
-
-                    eapType = unpack('B', authData[22:23])[0]
+                    eapType = unpack('B', str(bytearray(authData[22:23])))[0]
 
                     if eapType == AUTH_TYPE_IDENTITY:
-                        username = str(unpack('%ds' % (eapLength - 5), 
-                            authData[23:18 + eapLength])[0])
+                        # username = str(unpack('%ds' % (eapLength - 5),
+                        #     str(bytearray(authData[23:18 + eapLength])))[0])
 
                         packet = self.MakeEthernetHeader()
                         identity = self.username
-                        eapPacket = self.MakeEAPPacket(AUTH_RESPONSE, 
-                                eapID, pack('B%ds' % len(identity), 
+                        eapPacket = self.MakeEAPPacket(AUTH_RESPONSE,
+                                eapID, pack('B%ds' % len(identity),
                                     AUTH_TYPE_IDENTITY, identity))
-                        packet += self.MakeDot1XHeader(PKT_TYPE_EAP, 
+                        packet += self.MakeDot1XHeader(PKT_TYPE_EAP,
                                 len(eapPacket))
                         packet += eapPacket
 
-                        self.sock.pcap_sendpacket(packet, sizeof(packet))
+                        pcap_sendpacket(self.sock, MakePkt(packet), len(packet))
                         info('Identity sent.')
 
                         self.state = IDENTITY_SENT
@@ -118,47 +114,46 @@ class Dot1X():
             elif self.state == IDENTITY_RECEIVED:
 
                 if eapCode == AUTH_REQUEST:
-                
-                    eapType = unpack('B', authData[22:23])[0]
-                
+
+                    eapType = unpack('B', str(bytearray(authData[22:23])))[0]
+
                     if eapType == AUTH_TYPE_MD5CHALLENGE:
 
-                        challengeCodeSize = unpack('B', authData[23:24])[0]
+                        challengeCodeSize = unpack('B', str(bytearray(authData[23:24])))[0]
                         challengeCodeSize = authData[24:24 + challengeCodeSize]
 
-                        md5Response = md5(authData[19] + 
-                                self.password + challengeCodeSize).digest()
+                        md5Response = md5(str(bytearray(authData[19:20])) +
+                                self.password + str(bytearray(challengeCodeSize))).digest()
 
                         packet = self.MakeEthernetHeader()
                         eapPacket = self.MakeEAPPacket(AUTH_RESPONSE,
                                 eapID,
                                 pack('BB16s', AUTH_TYPE_MD5CHALLENGE,
                                     16, md5Response))
-                        packet += self.MakeDot1XHeader(PKT_TYPE_EAP, 
+                        packet += self.MakeDot1XHeader(PKT_TYPE_EAP,
                                 len(eapPacket))
                         packet += eapPacket
-                        self.sock.pcap_sendpacket(packet, sizeof(packet))
-    
+                        pcap_sendpacket(self.sock, MakePkt(packet), len(packet))
+
                         self.state = PASSWORD_SENT
-                
 
                 elif eapCode == AUTH_FAILURE:
                     pass
 
                 else:
                     pass
-        
-            elif self.state == AUTH_ENDED:
-                if eapCode == AUTH_SUCCESS: 
+
+            elif self.state == ENDED:
+                if eapCode == AUTH_SUCCESS:
                     self.ObtainIPAddr(self.interface)
                     break
                 else:
                     pass
-    
+
     def MakeEthernetHeader(self):
         return pack('>6s6sH', DOT1X_DST, self.hwAddr, ETH_TYPE_8021X)
 
-    def MakeDot1XHeader(self, authType, length = 0):
+    def MakeDot1XHeader(self, authType, length=0):
         return pack('>BBH', 1, authType, length)
 
     def MakeEAPPacket(self, eapCode, eapID, eapData):
@@ -167,13 +162,10 @@ class Dot1X():
     def ObtainIPAddr(self, interface):
         pass
 
-def GetInterfaceIndex(sock, interface):
-    ignore, intIndex = unpack('16sI', ioctl(sock, SIOCGIFINDEX, pack('16sI', interface, 0)))
-    return intIndex
 
 def GetMacAt(index):
     """----add by liangzi----get mac if have more than one newwork hardware"""
-    import os, re
+
     dirs = ['', r'c:\windows\system32', r'c:\winnt\system32']
     try:
         import ctypes
@@ -182,7 +174,6 @@ def GetMacAt(index):
         dirs.insert(0, buffer.value.decode('mbcs'))
     except:
         pass
-    macad=[]
     for dir in dirs:
         try:
             pipe = os.popen(os.path.join(dir, 'ipconfig') + ' /all')
@@ -199,10 +190,19 @@ def GetMacAt(index):
                     index = index - 1
     return 0
 
+
+def MakePkt(packet):
+    pkt = (c_ubyte * len(packet))()
+    for i in range(len(packet)):
+        tmp, = unpack('B', packet[i])
+        pkt[i] = tmp
+    return pkt
+
+
 def ListInterfaces():
-    alldevs=POINTER(pcap_if_t)()
-    d=POINTER(pcap_if_t)
-    errbuf= create_string_buffer(PCAP_ERRBUF_SIZE)
+    alldevs = POINTER(pcap_if_t)()
+    d = POINTER(pcap_if_t)
+    errbuf = create_string_buffer(PCAP_ERRBUF_SIZE)
 
     ## Retrieve the device list
     if (pcap_findalldevs(byref(alldevs), errbuf) == -1):
@@ -210,13 +210,13 @@ def ListInterfaces():
         sys.exit(1)
 
     interfaces = []
-    d=alldevs.contents
+    d = alldevs.contents
     while d:
         interfaces.append(d.name)
         if d.next:
-             d=d.next.contents
+            d = d.next.contents
         else:
-             d=False
+            d = False
     return interfaces
 
 interfaces = ListInterfaces()
@@ -228,5 +228,5 @@ for interface in interfaces:
     cnt += 1
 interfaceIndex = int(input('Choose a interface:\n')) - 1
 
-dialer = Dot1X('username', 'password', interfaces[interfaceIndex], interfaceIndex)
+dialer = Dot1X('02806020036@local', 'realcomp', interfaces[interfaceIndex], interfaceIndex)
 dialer.run()
