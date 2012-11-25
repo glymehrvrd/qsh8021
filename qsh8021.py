@@ -1,3 +1,14 @@
+#-------------------------------------------------------------------------------
+# Name:        winpcapy.py
+#
+# Author:      glyme 
+#
+# Created:     01/09/2009
+# Copyright:   (c) Massimo Ciani 2009
+#
+#-------------------------------------------------------------------------------
+
+
 # -*- coding: UTF-8 -*-
 
 import os
@@ -216,7 +227,7 @@ for interface in interfaces:
     print 'Description:%s' % interface.description
     cnt += 1
 interfaceIndex = int(raw_input('Choose a interface:\n')) - 1
-dialer = Dot1X('02806020036@local', 'realcomp', interfaces[interfaceIndex].name, interfaceIndex)
+dialer = Dot1X('xxx', 'xxx', interfaces[interfaceIndex].name, interfaceIndex)
 
 funcswitch = raw_input('Login?(y/n)')
 print type(funcswitch)
